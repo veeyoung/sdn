@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+#coding: utf-8
 import requests
 from requests.auth import HTTPBasicAuth
 import json
@@ -14,22 +16,10 @@ def del_flows_by_appId(controller_ip, appId):
     resp = requests.delete(url=get_device_url, headers=headers, auth=auth)
     return resp.status_code, resp.text
 
-def get_devices(controller_ip):
+def get_sth(controller_ip, sth):
     headers = { 'Accept': 'application/json' } # 请求的 headers，这是一个字典
-    get_device_url = 'http://{}:8181/onos/v1/devices'.format(controller_ip) # 请求的 URL，这里使用 format 方法以格式化字符串
-    resp = requests.get(url=get_device_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
-    return resp.status_code, resp.text # 函数将返回相应的状态码及响应的文本
-
-def get_hosts(controller_ip):
-    headers = { 'Accept': 'application/json' } # 请求的 headers，这是一个字典
-    get_host_url = 'http://{}:8181/onos/v1/hosts'.format(controller_ip) # 请求的 URL，这里使用 format 方法以格式化字符串
-    resp = requests.get(url=get_host_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
-    return resp.status_code, resp.text # 函数将返回相应的状态码及响应的文本
-
-def get_links(controller_ip):
-    headers = { 'Accept': 'application/json' } # 请求的 headers，这是一个字典
-    get_link_url = 'http://{}:8181/onos/v1/links'.format(controller_ip) # 请求的 URL，这里使用 format 方法以格式化字符串
-    resp = requests.get(url=get_link_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
+    get_url = 'http://{}:8181/onos/v1/{}'.format(controller_ip, sth) # 请求的 URL，这里使用 format 方法以格式化字符串
+    resp = requests.get(url=get_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
     return resp.status_code, resp.text # 函数将返回相应的状态码及响应的文本
 
 def disable_fwd(controller_ip, appId, deviceId):
@@ -146,13 +136,13 @@ def dijkstra(graph, start_node):
 
 
 if __name__ == '__main__':
-    status_code, resp = get_links(ip)
+    status_code, resp = get_sth(ip, "links")
     links = json.loads(resp)['links']
 
-    status_code, resp = get_hosts(ip)
+    status_code, resp = get_sth(ip, "hosts")
     hosts = json.loads(resp)['hosts']
 
-    status_code, resp = get_devices(ip)
+    status_code, resp = get_sth(ip, "devices")
     devices = json.loads(resp)['devices']
     devices_id = [i['id'] for i in devices]
 
@@ -179,8 +169,7 @@ if __name__ == '__main__':
         else:
             graph[link['src']['device']] = dict()
             graph[link['src']['device']][link['dst']['device']] = 1
-        
-    print(graph)
+
 
     appId = "myflow"
     for i in range(len(hosts) - 1):
