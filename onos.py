@@ -4,7 +4,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import json
 import sys
-from Sanic import sanic, response
+from sanic import Sanic, response
 
 ip = "127.0.0.1"
 auth = HTTPBasicAuth("karaf", "karaf")
@@ -49,7 +49,7 @@ class TreeNode:
                 link = find_link(self.links, node.value, child.value)
                 output_ports.append(link["src"]["port"])
             set_multicast_group_table(ip, group_id, output_ports)
-            add_group_flows(ip, node.value, self.appId, self.mac_src, sw_port_src, group_id):
+            add_group_flows(ip, node.value, self.appId, self.mac_src, sw_port_src, group_id)
         else:
             link = find_link(self.links, node.value, node.children.value)
             sw_port_dst = link["src"]["port"]
@@ -479,6 +479,11 @@ def process_request(action_type, actions):
     last_graph = graph
 
 
+# 创建 Sanic 应用
+app = Sanic("Sample_HTTP_Api")
+# JSON 形式输出异常
+app.config.FALLBACK_ERROR_FORMAT = "json"
+
 @app.post("/addflow")
 async def handle(request):
     data = request.json
@@ -491,12 +496,6 @@ async def handle(request):
                 "message": "error",
             }
         )
-
-
-# 创建 Sanic 应用
-app = Sanic("Sample_HTTP_Api")
-# JSON 形式输出异常
-app.config.FALLBACK_ERROR_FORMAT = "json"
 
 last_graph = None
 
