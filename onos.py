@@ -8,6 +8,7 @@ from sanic import Sanic, response
 
 ip = "127.0.0.1"
 auth = HTTPBasicAuth("karaf", "karaf")
+last_graph = None
 
 def find_link(links, src, dst):
      for link in links:
@@ -50,13 +51,15 @@ class TreeNode:
                 output_ports.append(link["src"]["port"])
             set_multicast_group_table(ip, group_id, output_ports)
             add_group_flows(ip, node.value, self.appId, self.mac_src, sw_port_src, group_id)
-        else:
-            link = find_link(self.links, node.value, node.children.value)
+        elif len(node.children) == 1:
+            link = find_link(self.links, node.value, node.children[0].value)
             sw_port_dst = link["src"]["port"]
             add_flows_no_mac_dst(ip, node.value, self.appId, self.mac_src, sw_port_src, sw_port_dst)
+        else:
+            return
 
         for child in node.children:
-            self._dfs_recursive(child, visited, group)
+            self._dfs_recursive(child, visited, sw_port_src)
 
 
 def del_flows_by_appId(controller_ip, appId):
@@ -347,24 +350,24 @@ def dijkstra(graph, start_node):
     return shortest_paths  # 返回最短路径和距离
 
 
-def multicast_routing(graph, source, receivers):
-    root = TreeNode(source)
+def multicast_routing(graph, source, receivers, links, appId, mac_src):
+    root = TreeNode(source, links, appId, mac_src)
     shortest_paths = dijkstra(graph, source)
 
     for receiver in receivers:
         path_to_receiver = shortest_paths[receiver][1] + [receiver]
-        update_multicast_tree(root, path_to_receiver)
+        update_multicast_tree(root, path_to_receiver, links, appId, mac_src)
 
     return root
 
 
-def update_multicast_tree(root, path):
+def update_multicast_tree(root, path, links, appId, mac_src):
     current_node = root
 
     for element in path[1:]:
         child = current_node.search_node(element)
         if not child:
-            current_node.insert_node(TreeNode(element))
+            current_node.insert_node(TreeNode(element, links, appId, mac_src))
         current_node = current_node.search_node(element)
 
 def are_dicts_equal(dict1, dict2):
@@ -394,6 +397,7 @@ def are_dicts_equal(dict1, dict2):
     return True
 
 def process_request(action_type, actions):
+    global last_graph
     status_code, resp = get_sth(ip, "links")
     links = json.loads(resp)['links']
 
@@ -417,6 +421,7 @@ def process_request(action_type, actions):
             graph[link['src']['device']] = dict()
             graph[link['src']['device']][link['dst']['device']] = 1
 
+
     # 判断拓扑是否变化
     if last_graph is None or not are_dicts_equal(last_graph, graph):
         # 删除原来的流表
@@ -426,7 +431,12 @@ def process_request(action_type, actions):
 
     appId = action_type
     if action_type == 'simple_flow':
-        hosts = actions
+        dst_hosts = []
+        for host in hosts:
+            if host["id"] in actions:
+                dst_hosts.append(host)
+        
+        hosts = dst_hosts
         for i in range(len(hosts) - 1):
             for j in range(i + 1, len(hosts)):
                 start_node = hosts[i]["locations"][0]["elementId"]
@@ -489,6 +499,12 @@ async def handle(request):
     data = request.json
     try:
         process_request(**data)
+        return response.json(
+            {
+                "status": 0,
+                "message": "success",
+            }
+        )
     except Exception as e:
         return response.json(
             {
@@ -497,21 +513,21 @@ async def handle(request):
             }
         )
 
-last_graph = None
 
 if __name__ == '__main__':
 
-    # 通过appId清空这个App之前下发的所有流表项
-    appId = "org.onosproject.core"
-    status_code, resp = del_flows_by_appId(ip, appId)
+    # # 通过appId清空这个App之前下发的所有流表项
+    # appId = "org.onosproject.core"
+    # status_code, resp = del_flows_by_appId(ip, appId)
 
-    status_code, resp = get_sth(ip, "devices")
-    devices = json.loads(resp)['devices']
-    devices_id = [i['id'] for i in devices]
-    # # 在所有交换机下发Drop流表项屏蔽fwd转发功能
-    appId = "disable.fwd"
-    for deviceId in devices_id:
-        status_code, resp = disable_fwd(ip, appId, deviceId)
+    # status_code, resp = get_sth(ip, "devices")
+    # devices = json.loads(resp)['devices']
+    # devices_id = [i['id'] for i in devices]
+    # # # 在所有交换机下发Drop流表项屏蔽fwd转发功能
+    # appId = "disable.fwd"
+    # for deviceId in devices_id:
+    #     status_code, resp = disable_fwd(ip, appId, deviceId)
+
 
     # 启动 Sanic 应用，为了避免多进程的额外问题，这里使用单进程模式
     app.run(host="127.0.0.1", port=8000, single_process=True)
