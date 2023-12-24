@@ -5,15 +5,13 @@ from requests.auth import HTTPBasicAuth
 import json
 import sys
 from sanic import Sanic, response
+import random, asyncio
 
 ip = "127.0.0.1"
 auth = HTTPBasicAuth("karaf", "karaf")
 last_graph = None
-
-def find_link(links, src, dst):
-     for link in links:
-        if link["src"]["device"] == src and link["dst"]["device"] == dst:
-            return link
+group_count = 0
+history_request = []
 
 class TreeNode:
     def __init__(self, value, links, appId, mac_src):
@@ -43,24 +41,38 @@ class TreeNode:
             return
         visited.add(node)
 
+        sw_port_dst = ""
         if len(node.children) > 1:
-            group_id = node.value
+            print('组播点:', node.value)
+            global group_count
+            group_count += 1
+            group_id = group_count
             output_ports = list()
             for child in node.children:
                 link = find_link(self.links, node.value, child.value)
                 output_ports.append(link["src"]["port"])
             set_multicast_group_table(ip, group_id, output_ports)
-            add_group_flows(ip, node.value, self.appId, self.mac_src, sw_port_src, group_id)
+            add_group_flows_udp(ip, node.value, self.appId, self.mac_src, sw_port_src, group_id)
+            sw_port_dst = output_ports
         elif len(node.children) == 1:
             link = find_link(self.links, node.value, node.children[0].value)
             sw_port_dst = link["src"]["port"]
-            add_flows_no_mac_dst(ip, node.value, self.appId, self.mac_src, sw_port_src, sw_port_dst)
-        else:
-            return
+            add_flows_udp(ip, node.value, self.appId, self.mac_src, None, sw_port_src, sw_port_dst)
+            sw_port_dst = [sw_port_dst]
 
-        for child in node.children:
-            self._dfs_recursive(child, visited, sw_port_src)
+        for child, port in zip(node.children, sw_port_dst):
+            self._dfs_recursive(child, visited, port)
 
+def get_sth(controller_ip, sth):
+    headers = { 'Accept': 'application/json' } # 请求的 headers，这是一个字典
+    get_url = 'http://{}:8181/onos/v1/{}'.format(controller_ip, sth) # 请求的 URL，这里使用 format 方法以格式化字符串
+    resp = requests.get(url=get_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
+    return resp.status_code, resp.text # 函数将返回相应的状态码及响应的文本
+
+def find_link(links, src, dst):
+     for link in links:
+        if link["src"]["device"] == src and link["dst"]["device"] == dst:
+            return link
 
 def del_flows_by_appId(controller_ip, appId):
     headers = {
@@ -69,14 +81,6 @@ def del_flows_by_appId(controller_ip, appId):
     get_device_url = 'http://{}:8181/onos/v1/flows/application/{}'.format(controller_ip, appId)
     resp = requests.delete(url=get_device_url, headers=headers, auth=auth)
     return resp.status_code, resp.text
-
-
-def get_sth(controller_ip, sth):
-    headers = { 'Accept': 'application/json' } # 请求的 headers，这是一个字典
-    get_url = 'http://{}:8181/onos/v1/{}'.format(controller_ip, sth) # 请求的 URL，这里使用 format 方法以格式化字符串
-    resp = requests.get(url=get_url, headers=headers, auth=auth) # 对 URL 的 GET 请求
-    return resp.status_code, resp.text # 函数将返回相应的状态码及响应的文本
-
 
 def disable_fwd(controller_ip, appId, deviceId):
     headers = {
@@ -118,60 +122,7 @@ def disable_fwd(controller_ip, appId, deviceId):
     resp = requests.post(url=get_device_url, params=params, headers=headers, auth=auth, data=json.dumps(flow_rule))
     return resp.status_code, resp.text
 
-
-def add_flows(controller_ip, deviceId, appId, mac_src, mac_dst, sw_port_src, sw_port_dst):
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-    }
-    params = {
-        "appId": appId
-    }
-    data = {
-        "priority": 40000,
-        "timeout": 0,
-        "isPermanent": True,
-        "deviceId": deviceId,
-        "treatment": {
-            "instructions": [
-                {
-                    "type": "OUTPUT",
-                    "port": sw_port_dst
-                }
-
-            ]
-        },
-        "selector": {
-            "criteria": [
-                {
-                    "type": "ETH_TYPE",
-                    "ethType": "0x0800"
-                },
-                {
-                    "type": "IP_PROTO",
-                    "protocol": 1
-                },
-                {
-                    "type": "ETH_DST",
-                    "mac": mac_dst
-                },
-                {
-                    "type": "ETH_SRC",
-                    "mac": mac_src
-                },
-                {
-                    "type": "IN_PORT",
-                    "port": sw_port_src
-                }
-            ]
-        }
-    }
-
-    get_device_url = 'http://{}:8181/onos/v1/flows/{}'.format(controller_ip, deviceId)
-    resp = requests.post(url=get_device_url, params=params, headers=headers, auth=auth, data=json.dumps(data))
-    return resp.status_code
-
-def add_flows_no_mac_dst(controller_ip, deviceId, appId, mac_src, sw_port_src, sw_port_dst):
+def add_flows_udp(controller_ip, deviceId, appId, mac_src, mac_dst, sw_port_src, sw_port_dst):
     headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -200,6 +151,10 @@ def add_flows_no_mac_dst(controller_ip, deviceId, appId, mac_src, sw_port_src, s
                     "ethType": "0x0800"
                 },
                 {
+                    "type": "IP_PROTO",
+                    "protocol": 17
+                },
+                {
                     "type": "ETH_SRC",
                     "mac": mac_src
                 },
@@ -210,12 +165,18 @@ def add_flows_no_mac_dst(controller_ip, deviceId, appId, mac_src, sw_port_src, s
             ]
         }
     }
+    if mac_dst is not None:
+        criteria_mac_dst = {
+            "type": "ETH_DST",
+            "mac": mac_dst
+        }
+        data['selector']['criteria'].append(criteria_mac_dst)
 
     get_device_url = 'http://{}:8181/onos/v1/flows/{}'.format(controller_ip, deviceId)
     resp = requests.post(url=get_device_url, params=params, headers=headers, auth=auth, data=json.dumps(data))
     return resp.status_code
 
-def modify_dst_ip_and_mac(controller_ip, deviceId, appId, mac_src, mac_dst, ip_dst, sw_port_dst):
+def modify_dst_ip_and_mac_udp(controller_ip, deviceId, appId, mac_src, mac_dst, ip_dst, sw_port_dst):
     headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -224,7 +185,7 @@ def modify_dst_ip_and_mac(controller_ip, deviceId, appId, mac_src, mac_dst, ip_d
         "appId": appId
     }
     data = {
-        "priority": 40000,
+        "priority": 10,
         "timeout": 0,
         "isPermanent": True,
         "deviceId": deviceId,
@@ -253,6 +214,10 @@ def modify_dst_ip_and_mac(controller_ip, deviceId, appId, mac_src, mac_dst, ip_d
                     "ethType": "0x0800"
                 },
                 {
+                    "type": "IP_PROTO",
+                    "protocol": 17
+                },
+                {
                     "type": "ETH_SRC",
                     "mac": mac_src
                 }
@@ -265,7 +230,7 @@ def modify_dst_ip_and_mac(controller_ip, deviceId, appId, mac_src, mac_dst, ip_d
     return resp.status_code
 
 
-def add_group_flows(controller_ip, deviceId, appId, mac_src, sw_port_src, group_id):
+def add_group_flows_udp(controller_ip, deviceId, appId, mac_src, sw_port_src, group_id):
     headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -294,6 +259,10 @@ def add_group_flows(controller_ip, deviceId, appId, mac_src, sw_port_src, group_
                     "ethType": "0x0800"
                 },
                 {
+                    "type": "IP_PROTO",
+                    "protocol": 17
+                },
+                {
                     "type": "ETH_SRC",
                     "mac": mac_src
                 },
@@ -318,15 +287,17 @@ def set_multicast_group_table(controller_ip, group_id, output_ports):
         "appId": "multicast_routing"  # 用于标识应用程序的唯一ID
     }
     group_data = {
+        "type": "ALL",
+        "appCookie": str(hex(random.getrandbits(64))),
         "groupId": group_id,
         "buckets": [
-            {"type": "L2_INTERFACE", "port": port} for port in output_ports
+            {"weight": 1,"treatment": {"instructions": [{"type": "OUTPUT", "port": port}]}} for port in output_ports
         ]
     }
 
     group_url = 'http://{}:8181/onos/v1/groups/{}'.format(controller_ip, group_id)
     resp = requests.post(url=group_url, params=params, headers=headers, auth=auth, data=json.dumps(group_data))
-    return resp.status_code, resp.text
+    return resp.status_code
 
 
 def dijkstra(graph, start_node):
@@ -396,8 +367,18 @@ def are_dicts_equal(dict1, dict2):
     # 如果所有键对应的值都相等，则字典相同
     return True
 
+def genGraph(links):
+    graph = dict()
+    for link in links:
+        if graph.get(link['src']['device']) is not None:
+            graph[link['src']['device']][link['dst']['device']] = 1
+        else:
+            graph[link['src']['device']] = dict()
+            graph[link['src']['device']][link['dst']['device']] = 1
+    
+    return graph
+
 def process_request(action_type, actions):
-    global last_graph
     status_code, resp = get_sth(ip, "links")
     links = json.loads(resp)['links']
 
@@ -408,26 +389,8 @@ def process_request(action_type, actions):
     devices = json.loads(resp)['devices']
     devices_id = [i['id'] for i in devices]
 
-    if len(links) * len(hosts) * len(devices_id) == 0:
-        print("获取拓扑失败!")
-        sys.exit(1)
-
     # 获取拓扑
-    graph = dict()
-    for link in links:
-        if graph.get(link['src']['device']) is not None:
-            graph[link['src']['device']][link['dst']['device']] = 1
-        else:
-            graph[link['src']['device']] = dict()
-            graph[link['src']['device']][link['dst']['device']] = 1
-
-
-    # 判断拓扑是否变化
-    if last_graph is None or not are_dicts_equal(last_graph, graph):
-        # 删除原来的流表
-        for deviceId in devices_id:
-            status_code, resp = disable_fwd(ip, "simple_flow", deviceId)
-            status_code, resp = disable_fwd(ip, "group_flow", deviceId)
+    graph = genGraph(links)
 
     appId = action_type
     if action_type == 'simple_flow':
@@ -442,27 +405,37 @@ def process_request(action_type, actions):
                 start_node = hosts[i]["locations"][0]["elementId"]
                 end_node = hosts[j]["locations"][0]["elementId"]
 
-                shortest_paths = dijkstra(graph, start_node)
-                path = shortest_paths[end_node][1] + [end_node]
+                try:
+                    shortest_paths = dijkstra(graph, start_node)
+                except:
+                    print("主机", hosts[i]['id'], "到主机", hosts[j]['id'], "不通")
+                    continue
+
+                path = ""
+
+                if len(shortest_paths) > 0 and end_node in shortest_paths:
+                    path = shortest_paths[end_node][1] + [end_node]
+                    print("主机", hosts[i]['id'], "到主机", hosts[j]['id'], "的路径为", path)
+                else:
+                    print("主机", hosts[i]['id'], "到主机", hosts[j]['id'], "不通")
+                    continue
 
                 sw_port_src = hosts[i]["locations"][0]["port"]
 
                 for k in range(len(path) - 1):
                     link = find_link(links, path[k], path[k + 1])
                     sw_port_dst = link["src"]["port"]
-                    status_code = add_flows('127.0.0.1', path[k], appId, hosts[i]["mac"], hosts[j]["mac"],
+                    status_code = add_flows_udp('127.0.0.1', path[k], appId, hosts[i]["mac"], hosts[j]["mac"],
                                             sw_port_src, sw_port_dst)
-
-                    status_code = add_flows('127.0.0.1', path[k], appId, hosts[j]["mac"], hosts[i]["mac"],
-                                            sw_port_dst, sw_port_src)
+                    status_code = add_flows_udp('127.0.0.1', path[k], appId, hosts[j]["mac"], hosts[i]["mac"],
+                                            sw_port_dst, sw_port_src)      
 
                     sw_port_src = link["dst"]["port"]
 
                 sw_port_dst = hosts[j]["locations"][0]["port"]
-                status_code = add_flows('127.0.0.1', path[-1], appId, hosts[i]["mac"], hosts[j]["mac"], sw_port_src,
+                status_code = add_flows_udp('127.0.0.1', path[-1], appId, hosts[i]["mac"], hosts[j]["mac"], sw_port_src,
                                         sw_port_dst)
-
-                status_code = add_flows('127.0.0.1', path[-1], appId, hosts[j]["mac"], hosts[i]["mac"], sw_port_dst,
+                status_code = add_flows_udp('127.0.0.1', path[-1], appId, hosts[j]["mac"], hosts[i]["mac"], sw_port_dst,
                                         sw_port_src)
 
     elif action_type == 'group_flow':
@@ -479,55 +452,83 @@ def process_request(action_type, actions):
 
                 if host["id"] in action[1]:
                     sw_dst.append(host["locations"][0]["elementId"])
+
             root = multicast_routing(graph, sw_src, sw_dst, links, appId, mac_src)
             root.dfs(sw_port_src)
 
             for host in hosts:
                 if host["id"] in action[1]:
-                    modify_dst_ip_and_mac(ip, host["locations"][0]["elementId"], appId, mac_src, host["mac"], host["ipAddresses"][0], host["locations"][0]["port"])
+                    print("修改到主机", host["id"],"的目的ip,mac为:", host["ipAddresses"][0], host["mac"])
+                    modify_dst_ip_and_mac_udp(ip, host["locations"][0]["elementId"], appId, mac_src, host["mac"], host["ipAddresses"][0], host["locations"][0]["port"])
 
     last_graph = graph
 
 
 # 创建 Sanic 应用
-app = Sanic("Sample_HTTP_Api")
+app = Sanic("path_HTTP_Api")
 # JSON 形式输出异常
 app.config.FALLBACK_ERROR_FORMAT = "json"
 
 @app.post("/addflow")
 async def handle(request):
+    global history_request
     data = request.json
-    try:
-        process_request(**data)
-        return response.json(
-            {
-                "status": 0,
-                "message": "success",
-            }
-        )
-    except Exception as e:
-        return response.json(
-            {
-                "status": -1,
-                "message": "error",
-            }
-        )
 
+    # 保存历史请求,方便在拓扑发生变化时能恢复
+    history_request.append(data)
+
+    # try:
+    process_request(**data)
+    return response.json(
+        {
+            "status": 0,
+            "message": "success",
+        }
+    )
+    # except Exception as e:
+    #     return response.json(
+    #         {
+    #             "status": -1,
+    #             "message": "error",
+    #         }
+    #     )
+
+async def check_topo_change():
+    global last_graph
+    while True:
+        await asyncio.sleep(5)
+        status_code, resp = get_sth(ip, "links")
+        links = json.loads(resp)['links']
+        graph = genGraph(links)
+        # 判断拓扑是否变化
+        if last_graph is not None and not are_dicts_equal(last_graph, graph):
+            print("拓扑发生变化")
+            # 删除原来的流表
+            for deviceId in devices_id:
+                status_code, resp = del_flows_by_appId(ip, "simple_flow")
+                status_code, resp = del_flows_by_appId(ip, "group_flow")
+            # 尝试恢复原来的流表
+            for history in history_request:
+                process_request(**history)
+        
+        last_graph = graph
 
 if __name__ == '__main__':
 
-    # # 通过appId清空这个App之前下发的所有流表项
-    # appId = "org.onosproject.core"
-    # status_code, resp = del_flows_by_appId(ip, appId)
+    status_code, resp = get_sth(ip, "devices")
+    devices = json.loads(resp)['devices']
+    devices_id = [i['id'] for i in devices]
+    # # 在所有交换机下发Drop流表项屏蔽fwd转发功能
+    appId = "disable.fwd"
+    for deviceId in devices_id:
+        status_code, resp = disable_fwd(ip, appId, deviceId)
 
-    # status_code, resp = get_sth(ip, "devices")
-    # devices = json.loads(resp)['devices']
-    # devices_id = [i['id'] for i in devices]
-    # # # 在所有交换机下发Drop流表项屏蔽fwd转发功能
-    # appId = "disable.fwd"
-    # for deviceId in devices_id:
-    #     status_code, resp = disable_fwd(ip, appId, deviceId)
+    # 输出所有主机,便于查看
+    status_code, resp = get_sth(ip, "hosts")
+    hosts = json.loads(resp)['hosts']
+    host_names = [host['id'] for host in hosts]
+    print("所有主机:", host_names)
 
-
+    app.add_task(check_topo_change())
     # 启动 Sanic 应用，为了避免多进程的额外问题，这里使用单进程模式
     app.run(host="127.0.0.1", port=8000, single_process=True)
